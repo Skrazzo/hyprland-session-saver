@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +37,7 @@ def get_clients():
 
 
 def get_shell_children(pid: int):
-    """Get cwd and nvim status for each child process of a terminal."""
+    """Get cwd and foreground command for each child process of a terminal."""
     try:
         ps = subprocess.run(
             ["ps", "--ppid", str(pid), "-o", "pid="],
@@ -48,8 +49,8 @@ def get_shell_children(pid: int):
                 continue
             child_pid = int(child_str)
             cwd = get_cwd(child_pid)
-            in_nvim = is_nvim_running(child_pid)
-            result.append({"cwd": cwd, "in_nvim": in_nvim})
+            command = get_foreground_command(child_pid)
+            result.append({"cwd": cwd, "command": command})
         return result
     except Exception:
         return []
@@ -62,24 +63,20 @@ def get_cwd(pid: int):
         return None
 
 
-def is_nvim_running(pid: int):
+def get_foreground_command(pid: int):
+    """Get the command running inside a shell process, if any."""
     try:
-        children = (
-            subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True)
-            .stdout.strip()
-            .split()
-        )
-        for child in children:
-            comm = subprocess.run(
-                ["ps", "-p", child, "-o", "comm="], capture_output=True, text=True
-            ).stdout.strip()
-            if comm == "nvim":
-                return True
-            if is_nvim_running(int(child)):
-                return True
-        return False
+        child = subprocess.run(
+            ["ps", "--ppid", str(pid), "-o", "pid="],
+            capture_output=True, text=True,
+        ).stdout.strip().split()
+        if not child or not child[0]:
+            return None
+        with open(f"/proc/{child[0]}/cmdline", "r") as f:
+            cmdline = [arg for arg in f.read().split("\0") if arg]
+        return cmdline if cmdline else None
     except Exception:
-        return False
+        return None
 
 
 def get_mpv_file(pid: int):
@@ -123,21 +120,21 @@ def save_session():
             children = _term_children[pid]
             if idx < len(children):
                 entry["cwd"] = children[idx]["cwd"]
-                entry["in_nvim"] = children[idx]["in_nvim"]
+                entry["command"] = children[idx]["command"]
             else:
                 entry["cwd"] = None
-                entry["in_nvim"] = False
+                entry["command"] = None
             _term_index[pid] = idx + 1
 
         elif app_class.lower() == "mpv" and pid:
             mpv_file = get_mpv_file(pid)
             entry["mpv_file"] = mpv_file
             entry["cwd"] = None
-            entry["in_nvim"] = False
+            entry["command"] = None
 
         else:
             entry["cwd"] = None
-            entry["in_nvim"] = False
+            entry["command"] = None
 
         session_data.append(entry)
 
@@ -165,7 +162,11 @@ def restore_session(skip_open=False):
         app_class = entry["class"]
         workspace = entry.get("workspace", "1")
         cwd = entry.get("cwd")
-        in_nvim = entry.get("in_nvim", False)
+        command = entry.get("command")
+
+        # Backward compatibility: old sessions used in_nvim instead of command
+        if command is None and entry.get("in_nvim"):
+            command = ["nvim"]
 
         # With --skip-open, skip apps that are already running.
         # Terminals are exempt — they always allow multiple instances.
@@ -176,12 +177,15 @@ def restore_session(skip_open=False):
         elif app_class.lower() in TERMINALS:
             term = app_class.lower()
             if cwd and Path(cwd).exists():
-                if in_nvim:
-                    cmd = f"{term} -e nvim '{cwd}'"
+                if command:
+                    cmd = f"{term} --working-directory '{cwd}' -e {shlex.join(command)}"
                 else:
                     cmd = f"{term} --working-directory '{cwd}'"
             else:
-                cmd = term
+                if command:
+                    cmd = f"{term} -e {shlex.join(command)}"
+                else:
+                    cmd = term
 
         elif app_class.lower() == "mpv":
             mpv_file = entry.get("mpv_file")

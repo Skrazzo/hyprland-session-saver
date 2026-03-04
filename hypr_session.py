@@ -10,6 +10,7 @@ import importlib.util
 SESSION_FILE = Path.home() / ".config" / "hypr" / "session.json"
 CONFIG_FILE = Path.home() / ".config" / "hypr-session" / "config.py"
 TERMINALS = {"alacritty", "kitty"}
+KNOWN_SHELLS = {"fish", "bash", "zsh", "sh", "dash", "tcsh", "ksh", "csh", "nu", "elvish", "xonsh"}
 
 try:
     # Try to import user-specific config
@@ -40,16 +41,26 @@ def get_shell_children(pid: int):
     """Get cwd and foreground command for each child process of a terminal."""
     try:
         ps = subprocess.run(
-            ["ps", "--ppid", str(pid), "-o", "pid="],
+            ["ps", "--ppid", str(pid), "-o", "pid=,comm="],
             capture_output=True, text=True,
-        ).stdout.strip().split()
+        ).stdout.strip().splitlines()
         result = []
-        for child_str in ps:
-            if not child_str:
+        for line in ps:
+            parts = line.split()
+            if not parts:
                 continue
-            child_pid = int(child_str)
+            child_pid = int(parts[0])
+            comm = parts[1] if len(parts) > 1 else ""
+            # Skip kitty's internal shell-integration helper
+            if comm == "kitten":
+                continue
             cwd = get_cwd(child_pid)
-            command = get_foreground_command(child_pid)
+            if comm in KNOWN_SHELLS:
+                # It's a shell — look at what command is running inside it
+                command = get_foreground_command(child_pid)
+            else:
+                # Direct program (e.g., nvim via `kitty -e nvim`) — use its own cmdline
+                command = read_cmdline(child_pid)
             result.append({"cwd": cwd, "command": command})
         return result
     except Exception:
@@ -59,6 +70,16 @@ def get_shell_children(pid: int):
 def get_cwd(pid: int):
     try:
         return os.readlink(f"/proc/{pid}/cwd")
+    except Exception:
+        return None
+
+
+def read_cmdline(pid: int):
+    """Read the command line of a process."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "r") as f:
+            cmdline = [arg for arg in f.read().split("\0") if arg]
+        return cmdline if cmdline else None
     except Exception:
         return None
 

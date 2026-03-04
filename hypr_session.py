@@ -35,28 +35,24 @@ def get_clients():
     return json.loads(result.stdout)
 
 
-def get_child_pid(pid: int):
+def get_shell_children(pid: int):
+    """Get cwd and nvim status for each child process of a terminal."""
     try:
-        ps = (
-            subprocess.run(
-                ["ps", "--ppid", str(pid), "-o", "pid,comm="],
-                capture_output=True,
-                text=True,
-            )
-            .stdout.strip()
-            .splitlines()
-        )
-        if not ps:
-            return None
-        for line in ps:
-            if "nvim" in line:
-                return int(line.split()[0])
-        for line in ps:
-            if any(sh in line for sh in ["zsh", "bash", "fish"]):
-                return int(line.split()[0])
-        return int(ps[0].split()[0])
+        ps = subprocess.run(
+            ["ps", "--ppid", str(pid), "-o", "pid="],
+            capture_output=True, text=True,
+        ).stdout.strip().split()
+        result = []
+        for child_str in ps:
+            if not child_str:
+                continue
+            child_pid = int(child_str)
+            cwd = get_cwd(child_pid)
+            in_nvim = is_nvim_running(child_pid)
+            result.append({"cwd": cwd, "in_nvim": in_nvim})
+        return result
     except Exception:
-        return None
+        return []
 
 
 def get_cwd(pid: int):
@@ -103,6 +99,8 @@ def get_mpv_file(pid: int):
 def save_session():
     clients = get_clients()
     session_data = []
+    _term_children = {}
+    _term_index = {}
 
     for c in clients:
         app_class = c.get("class")
@@ -113,12 +111,23 @@ def save_session():
         pid = c.get("pid")
         entry = {"class": app_class, "workspace": workspace}
 
-        if app_class.lower() == "alacritty" and pid:
-            child_pid = get_child_pid(pid)
-            cwd = get_cwd(child_pid or pid)
-            in_nvim = is_nvim_running(pid)
-            entry["cwd"] = cwd
-            entry["in_nvim"] = in_nvim
+        if app_class.lower() in TERMINALS and pid:
+            # Terminals like kitty may share a single PID across multiple windows.
+            # We enumerate all shell children once per PID, then assign each
+            # window the next child so every window gets its own cwd/nvim state.
+            if pid not in _term_children:
+                _term_children[pid] = get_shell_children(pid)
+                _term_index[pid] = 0
+
+            idx = _term_index[pid]
+            children = _term_children[pid]
+            if idx < len(children):
+                entry["cwd"] = children[idx]["cwd"]
+                entry["in_nvim"] = children[idx]["in_nvim"]
+            else:
+                entry["cwd"] = None
+                entry["in_nvim"] = False
+            _term_index[pid] = idx + 1
 
         elif app_class.lower() == "mpv" and pid:
             mpv_file = get_mpv_file(pid)

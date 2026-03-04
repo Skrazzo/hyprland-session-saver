@@ -8,6 +8,7 @@ import importlib.util
 
 SESSION_FILE = Path.home() / ".config" / "hypr" / "session.json"
 CONFIG_FILE = Path.home() / ".config" / "hypr-session" / "config.py"
+TERMINALS = {"alacritty", "kitty"}
 
 try:
     # Try to import user-specific config
@@ -138,7 +139,10 @@ def save_session():
     notify(f"Session saved ({len(session_data)} apps).")
 
 
-def restore_session():
+def restore_session(skip_open=False):
+    running_clients = get_clients()
+    running_classes = {c.get("class", "").lower() for c in running_clients}
+
     if not SESSION_FILE.exists():
         notify("No saved session found.", "critical")
         sys.exit(1)
@@ -154,14 +158,21 @@ def restore_session():
         cwd = entry.get("cwd")
         in_nvim = entry.get("in_nvim", False)
 
-        if app_class.lower() == "alacritty":
+        # With --skip-open, skip apps that are already running.
+        # Terminals are exempt — they always allow multiple instances.
+        if skip_open and app_class.lower() in running_classes and app_class.lower() not in TERMINALS:
+            skipped += 1
+            continue
+
+        elif app_class.lower() in TERMINALS:
+            term = app_class.lower()
             if cwd and Path(cwd).exists():
                 if in_nvim:
-                    cmd = f"alacritty -e nvim '{cwd}'"
+                    cmd = f"{term} -e nvim '{cwd}'"
                 else:
-                    cmd = f"alacritty --working-directory '{cwd}'"
+                    cmd = f"{term} --working-directory '{cwd}'"
             else:
-                cmd = "alacritty"
+                cmd = term
 
         elif app_class.lower() == "mpv":
             mpv_file = entry.get("mpv_file")
@@ -199,14 +210,16 @@ def clear_session():
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        notify("Usage: hypr-session [save|restore|clear]")
+        notify("Usage: hypr-session [save|restore|clear] [--skip-open]")
         sys.exit(1)
 
     action = sys.argv[1].lower()
+    skip_open = "--skip-open" in sys.argv
+
     if action == "save":
         save_session()
     elif action == "restore":
-        restore_session()
+        restore_session(skip_open=skip_open)
     elif action == "clear":
         clear_session()
     else:
